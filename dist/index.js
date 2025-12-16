@@ -10078,7 +10078,7 @@ Object.defineProperty(exports, "GitHub", ({ enumerable: true, get: function () {
 exports.configSchema = __nccwpck_require__(26060);
 exports.manifestSchema = __nccwpck_require__(8695);
 // x-release-please-start-version
-exports.VERSION = '18.0.2';
+exports.VERSION = '18.1.0';
 // x-release-please-end
 //# sourceMappingURL=index.js.map
 
@@ -10394,7 +10394,10 @@ class Manifest {
         this.logger.info(`Splitting ${commits.length} commits by path`);
         const cs = new commit_split_1.CommitSplit({
             includeEmpty: true,
-            packagePaths: Object.keys(this.repositoryConfig),
+            packagePaths: Object.fromEntries(Object.entries(this.repositoryConfig).map(([path, config]) => [
+                path,
+                config.additionalPaths || [],
+            ])),
         });
         const splitCommits = cs.split(commits);
         // limit paths to ones since the last release
@@ -10930,6 +10933,7 @@ function extractReleaserConfig(config) {
         skipSnapshot: config['skip-snapshot'],
         initialVersion: config['initial-version'],
         excludePaths: config['exclude-paths'],
+        additionalPaths: config['additional-paths'],
         dateFormat: config['date-format'],
     };
 }
@@ -11144,7 +11148,7 @@ async function latestReleaseVersion(github, targetBranch, releaseFilter, config,
     return candidateTagVersion.sort((a, b) => b.compare(a))[0];
 }
 function mergeReleaserConfig(defaultConfig, pathConfig) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9;
     return {
         releaseType: (_b = (_a = pathConfig.releaseType) !== null && _a !== void 0 ? _a : defaultConfig.releaseType) !== null && _b !== void 0 ? _b : 'node',
         bumpMinorPreMajor: (_c = pathConfig.bumpMinorPreMajor) !== null && _c !== void 0 ? _c : defaultConfig.bumpMinorPreMajor,
@@ -11177,7 +11181,8 @@ function mergeReleaserConfig(defaultConfig, pathConfig) {
         initialVersion: (_5 = pathConfig.initialVersion) !== null && _5 !== void 0 ? _5 : defaultConfig.initialVersion,
         extraLabels: (_6 = pathConfig.extraLabels) !== null && _6 !== void 0 ? _6 : defaultConfig.extraLabels,
         excludePaths: (_7 = pathConfig.excludePaths) !== null && _7 !== void 0 ? _7 : defaultConfig.excludePaths,
-        dateFormat: (_8 = pathConfig.dateFormat) !== null && _8 !== void 0 ? _8 : defaultConfig.dateFormat,
+        additionalPaths: (_8 = pathConfig.additionalPaths) !== null && _8 !== void 0 ? _8 : defaultConfig.additionalPaths,
+        dateFormat: (_9 = pathConfig.dateFormat) !== null && _9 !== void 0 ? _9 : defaultConfig.dateFormat,
     };
 }
 /**
@@ -19827,14 +19832,18 @@ class CommitSplit {
         opts = opts || {};
         this.includeEmpty = !!opts.includeEmpty;
         if (opts.packagePaths) {
-            const paths = (0, commit_utils_1.normalizePaths)(opts.packagePaths);
-            this.packagePaths = paths
-                .filter(path => {
+            this.packagePaths = Object.fromEntries(Object.entries(opts.packagePaths)
+                .map(([path, additionalPaths]) => [
+                (0, commit_utils_1.normalizePath)(path),
+                (0, commit_utils_1.normalizePaths)(additionalPaths),
+            ])
+                .filter(([path]) => {
                 // The special "." path, representing the root of the module, should be
                 // ignored by commit-split as it is assigned all commits in manifest.ts
                 return path !== manifest_1.ROOT_PROJECT_PATH;
             })
-                .sort((a, b) => b.length - a.length); // sort by longest paths first
+                .sort(([a], [b]) => b.length - a.length) // sort by longest paths first
+            );
         }
     }
     /**
@@ -19849,6 +19858,7 @@ class CommitSplit {
     split(commits) {
         const splitCommits = {};
         commits.forEach(commit => {
+            var _a;
             if (commit.files === undefined) {
                 throw new Error(`Commit ${commit.sha} is missing files. Did you set "backfillFiles" to "true"?`);
             }
@@ -19862,26 +19872,49 @@ class CommitSplit {
                 // in this edge-case we should not attempt to update the path.
                 if (splitPath.length === 1)
                     continue;
-                let pkgName;
+                // first match the file to a primary package.
+                // Each file can match at most one primary package.
+                // Files are sorted by longest path first, so the first
+                // match will be the most specific. ie if there are two packages: ["core", "core/lib"]
+                // then the file "core/lib/foo.txt" should be assigned to "core/lib" and not "core".
+                let primaryPkgName;
                 if (this.packagePaths) {
                     // only track paths under this.packagePaths
-                    pkgName = this.packagePaths.find(p => file.indexOf(`${p}/`) === 0);
+                    primaryPkgName = (_a = Object.entries(this.packagePaths).find(([p]) => file.indexOf(`${p}/`) === 0)) === null || _a === void 0 ? void 0 : _a[0];
                 }
                 else {
                     // track paths by top level folder
-                    pkgName = splitPath[0];
+                    primaryPkgName = splitPath[0];
                 }
-                if (!pkgName || dedupe.has(pkgName))
+                if (!primaryPkgName || dedupe.has(primaryPkgName))
                     continue;
                 else
-                    dedupe.add(pkgName);
-                if (!splitCommits[pkgName])
-                    splitCommits[pkgName] = [];
-                splitCommits[pkgName].push(commit);
+                    dedupe.add(primaryPkgName);
+                if (!splitCommits[primaryPkgName])
+                    splitCommits[primaryPkgName] = [];
+                splitCommits[primaryPkgName].push(commit);
             }
+            // next assign the file to additional packages based on their additional paths.
+            // This is for cases where someone has specified dependencies outside of the
+            // package directory. For example, if both packages "foo" and "bar" have additional
+            // path "shared", then commits to "shared/foo.txt" should be assigned to both packages.
+            commit.files.forEach(file => {
+                if (this.packagePaths) {
+                    Object.entries(this.packagePaths).forEach(([pkgName, additionalPaths]) => {
+                        if (additionalPaths.some(path => file.indexOf(`${path}/`) === 0)) {
+                            if (dedupe.has(pkgName))
+                                return;
+                            dedupe.add(pkgName);
+                            if (!splitCommits[pkgName])
+                                splitCommits[pkgName] = [];
+                            splitCommits[pkgName].push(commit);
+                        }
+                    });
+                }
+            });
             if (commit.files.length === 0 && this.includeEmpty) {
                 if (this.packagePaths) {
-                    for (const pkgName of this.packagePaths) {
+                    for (const pkgName of Object.keys(this.packagePaths)) {
                         splitCommits[pkgName] = splitCommits[pkgName] || [];
                         splitCommits[pkgName].push(commit);
                     }
@@ -19920,24 +19953,26 @@ exports.CommitSplit = CommitSplit;
 // See the License for the specific language governing permissions and
 // limitations under the License.
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.normalizePaths = void 0;
+exports.normalizePath = exports.normalizePaths = void 0;
 const normalizePaths = (paths) => {
-    return paths.map(path => {
-        // normalize so that all paths have leading and trailing slashes for
-        // non-overlap validation.
-        // NOTE: GitHub API always returns paths using the `/` separator,
-        // regardless of what platform the client code is running on
-        let newPath = path.replace(/\/$/, '');
-        newPath = newPath.replace(/^\//, '');
-        newPath = newPath.replace(/$/, '/');
-        newPath = newPath.replace(/^/, '/');
-        // store them with leading and trailing slashes removed.
-        newPath = newPath.replace(/\/$/, '');
-        newPath = newPath.replace(/^\//, '');
-        return newPath;
-    });
+    return paths.map(exports.normalizePath);
 };
 exports.normalizePaths = normalizePaths;
+const normalizePath = (path) => {
+    // normalize so that all paths have leading and trailing slashes for
+    // non-overlap validation.
+    // NOTE: GitHub API always returns paths using the `/` separator,
+    // regardless of what platform the client code is running on
+    let newPath = path.replace(/\/$/, '');
+    newPath = newPath.replace(/^\//, '');
+    newPath = newPath.replace(/$/, '/');
+    newPath = newPath.replace(/^/, '/');
+    // store them with leading and trailing slashes removed.
+    newPath = newPath.replace(/\/$/, '');
+    newPath = newPath.replace(/^\//, '');
+    return newPath;
+};
+exports.normalizePath = normalizePath;
 //# sourceMappingURL=commit-utils.js.map
 
 /***/ }),
@@ -105430,7 +105465,7 @@ exports.JSONPath = JSONPath;
 /***/ ((module) => {
 
 "use strict";
-module.exports = {"i8":"18.0.2"};
+module.exports = {"i8":"18.1.0"};
 
 /***/ }),
 
@@ -105438,7 +105473,7 @@ module.exports = {"i8":"18.0.2"};
 /***/ ((module) => {
 
 "use strict";
-module.exports = JSON.parse('{"$schema":"http://json-schema.org/draft-07/schema#","title":"release-please manifest config schema","description":"Schema for defining manifest config file","type":"object","additionalProperties":false,"definitions":{"ReleaserConfigOptions":{"type":"object","properties":{"release-type":{"description":"The strategy to use for this component.","type":"string"},"bump-minor-pre-major":{"description":"Breaking changes only bump semver minor if version < 1.0.0","type":"boolean"},"bump-patch-for-minor-pre-major":{"description":"Feature changes only bump semver patch if version < 1.0.0","type":"boolean"},"prerelease-type":{"description":"Configuration option for the prerelease versioning strategy. If prerelease strategy used and type set, will set the prerelease part of the version to the provided value in case prerelease part is not present.","type":"string"},"versioning":{"description":"Versioning strategy. Defaults to `default`","type":"string"},"changelog-sections":{"description":"Override the Changelog configuration sections","type":"array","items":{"type":"object","properties":{"type":{"description":"Semantic commit type (e.g. `feat`, `chore`)","type":"string"},"section":{"description":"Changelog section title","type":"string"},"hidden":{"description":"Skip displaying this type of commit. Defaults to `false`.","type":"boolean"}},"required":["type","section"]}},"release-as":{"description":"[DEPRECATED] Override the next version of this package. Consider using a `Release-As` commit instead.","type":"string"},"skip-github-release":{"description":"Skip tagging GitHub releases for this package. Release-Please still requires releases to be tagged, so this option should only be used if you have existing infrastructure to tag these releases.Defaults to `false`.","type":"boolean"},"skip-changelog":{"description":"Skip generating a changelog for this package. Defaults to `false`.","type":"boolean"},"draft":{"description":"Create the GitHub release in draft mode. Defaults to `false`.","type":"boolean"},"prerelease":{"description":"Create the GitHub release as prerelease. Defaults to `false`.","type":"boolean"},"draft-pull-request":{"description":"Open the release pull request in draft mode. Defaults to `false`.","type":"boolean"},"extra-label":{"description":"Comma-separated list of labels to add to a newly opened pull request","type":"string"},"include-component-in-tag":{"description":"When tagging a release, include the component name as part of the tag. Defaults to `true`.","type":"boolean"},"include-v-in-tag":{"description":"When tagging a release, include `v` in the tag. Defaults to `false`.","type":"boolean"},"changelog-type":{"description":"The type of changelog to use. Defaults to `default`.","type":"string","enum":["default","github"]},"changelog-host":{"description":"Generate changelog links to this GitHub host. Useful for running against GitHub Enterprise.","type":"string"},"changelog-path":{"description":"Path to the file that tracks release note changes. Defaults to `CHANGELOG.md`.","type":"string"},"pull-request-title-pattern":{"description":"Customize the release pull request title.","type":"string"},"pull-request-header":{"description":"Customize the release pull request header.","type":"string"},"pull-request-footer":{"description":"Customize the release pull request footer.","type":"string"},"separate-pull-requests":{"description":"Open a separate release pull request for each component. Defaults to `false`.","type":"boolean"},"always-update":{"description":"Always update the pull request with the latest changes. Defaults to `false`.","type":"boolean"},"tag-separator":{"description":"Customize the separator between the component and version in the GitHub tag.","type":"string"},"date-format":{"description":"Date format given as a strftime expression for the generic strategy.","type":"string"},"extra-files":{"description":"Specify extra generic files to replace versions.","type":"array","items":{"anyOf":[{"description":"The path to the file. The `Generic` updater uses annotations to replace versions.","type":"string"},{"description":"An extra JSON, YAML, or TOML file with a targeted update via jsonpath.","type":"object","properties":{"type":{"description":"The file format type.","enum":["json","toml","yaml"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"},"jsonpath":{"description":"The jsonpath to the version entry in the file.","type":"string"}},"required":["type","path","jsonpath"]},{"description":"An extra XML file with a targeted update via xpath.","type":"object","properties":{"type":{"description":"The file format type.","enum":["xml"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"},"xpath":{"description":"The xpath to the version entry in the file.","type":"string"}},"required":["type","path","xpath"]},{"description":"An extra pom.xml file.","type":"object","properties":{"type":{"description":"The file format type.","enum":["pom"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"}},"required":["type","path"]},{"description":"An extra arbitrary file that includes release-please generic updater\'s annotation.","type":"object","properties":{"type":{"description":"The file format type.","enum":["generic"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"}},"required":["type","path"]}]}},"exclude-paths":{"description":"Path of commits to be excluded from parsing. If all files from commit belong to one of the paths it will be skipped","type":"array","items":{"type":"string"}},"version-file":{"description":"Path to the specialize version file. Used by `ruby` and `simple` strategies.","type":"string"},"snapshot-label":{"description":"Label to add to snapshot pull request. Used by `java` strategies.","type":"string"},"skip-snapshot":{"description":"If set, do not propose snapshot pull requests. Used by `java` strategies.","type":"boolean"},"initial-version":{"description":"Releases the initial library with a specified version","type":"string"},"component-no-space":{"description":"release-please automatically adds ` ` (space) in front of parsed ${component}. This option indicates whether that behaviour should be disabled. Defaults to `false`","type":"boolean"}}}},"allOf":[{"$ref":"#/definitions/ReleaserConfigOptions"},{"properties":{"$schema":{"description":"Path to the release-please manifest config schema","type":"string","format":"uri-reference"},"packages":{"description":"Per-path component configuration.","type":"object","additionalProperties":{"$ref":"#/definitions/ReleaserConfigOptions"}},"bootstrap-sha":{"description":"For the initial release of a library, only consider as far back as this commit SHA. This is an uncommon use case and should generally be avoided.","type":"string"},"last-release-sha":{"description":"For any release, only consider as far back as this commit SHA. This is an uncommon use case and should generally be avoided.","type":"string"},"always-link-local":{"description":"When using the `node-workspace` plugin, force all local dependencies to be linked.","type":"boolean"},"plugins":{"description":"Plugins to apply to pull requests. Plugins can be added to perform extra release processing that cannot be achieved by an individual release strategy.","type":"array","items":{"anyOf":[{"description":"The plugin name for plugins that do not require other options.","type":"string"},{"description":"Configuration for the `linked-versions` plugin.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["linked-versions"]},"groupName":{"description":"The name of the group of components.","type":"string"},"components":{"description":"List of component names that are part of this group.","type":"array","items":{"type":"string"}},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"specialWords":{"description":"Words that sentence casing logic will not be applied to","type":"array","items":{"type":"string"}}},"required":["type","groupName","components"]},{"description":"Configuration for various `workspace` plugins.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["cargo-workspace","maven-workspace"]},"updateAllPackages":{"description":"Whether to force updating all packages regardless of the dependency tree. Defaults to `false`.","type":"boolean"},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"considerAllArtifacts":{"description":"Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.","type":"boolean"}}},{"description":"Configuration for various `workspace` plugins.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["node-workspace"]},"updateAllPackages":{"description":"Whether to force updating all packages regardless of the dependency tree. Defaults to `false`.","type":"boolean"},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"considerAllArtifacts":{"description":"Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.","type":"boolean"},"updatePeerDependencies":{"description":"Also bump peer dependency versions if they are modified. Defaults to `false`.","type":"boolean"}}},{"description":"Configuration for various `group-priority` plugin","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["group-priority"]},"groups":{"description":"Group names ordered with highest priority first.","type":"array","items":{"type":"string"}}}},{"description":"Other plugins","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string"}}}]}},"signoff":{"description":"Text to be used as Signed-off-by in the commit.","type":"string"},"group-pull-request-title-pattern":{"description":"When grouping multiple release pull requests use this pattern for the title.","type":"string"},"release-search-depth":{"description":"When considering previously releases, only look this deep.","type":"number"},"commit-search-depth":{"description":"When considering commit history, only look this many commits deep.","type":"number"},"sequential-calls":{"description":"Whether to open pull requests/releases sequentially rather than concurrently. If you have many components, you may want to set this to avoid secondary rate limits.","type":"boolean"},"label":{"description":"Comma-separated list of labels to add to newly opened pull request. These are used to identify release pull requests.","type":"string"},"release-label":{"description":"Comma-separated list of labels to add to a pull request that has been released/tagged","type":"string"},"component-no-space":{"description":"release-please automatically adds ` ` (space) in front of parsed ${component}. This option indicates whether that behaviour should be disabled. Defaults to `false`","type":"boolean"}},"required":["packages"]}],"properties":{"$schema":true,"packages":true,"bootstrap-sha":true,"last-release-sha":true,"always-link-local":true,"plugins":true,"signoff":true,"group-pull-request-title-pattern":true,"release-search-depth":true,"commit-search-depth":true,"sequential-calls":true,"release-type":true,"bump-minor-pre-major":true,"bump-patch-for-minor-pre-major":true,"versioning":true,"changelog-sections":true,"release-as":true,"skip-github-release":true,"skip-changelog":true,"draft":true,"prerelease":true,"draft-pull-request":true,"label":true,"release-label":true,"extra-label":true,"include-component-in-tag":true,"include-v-in-tag":true,"changelog-type":true,"changelog-host":true,"changelog-path":true,"pull-request-title-pattern":true,"pull-request-header":true,"pull-request-footer":true,"separate-pull-requests":true,"always-update":true,"tag-separator":true,"date-format":true,"extra-files":true,"version-file":true,"snapshot-label":true,"initial-version":true,"exclude-paths":true,"component-no-space":false}}');
+module.exports = JSON.parse('{"$schema":"http://json-schema.org/draft-07/schema#","title":"release-please manifest config schema","description":"Schema for defining manifest config file","type":"object","additionalProperties":false,"definitions":{"ReleaserConfigOptions":{"type":"object","properties":{"release-type":{"description":"The strategy to use for this component.","type":"string"},"bump-minor-pre-major":{"description":"Breaking changes only bump semver minor if version < 1.0.0","type":"boolean"},"bump-patch-for-minor-pre-major":{"description":"Feature changes only bump semver patch if version < 1.0.0","type":"boolean"},"prerelease-type":{"description":"Configuration option for the prerelease versioning strategy. If prerelease strategy used and type set, will set the prerelease part of the version to the provided value in case prerelease part is not present.","type":"string"},"versioning":{"description":"Versioning strategy. Defaults to `default`","type":"string"},"changelog-sections":{"description":"Override the Changelog configuration sections","type":"array","items":{"type":"object","properties":{"type":{"description":"Semantic commit type (e.g. `feat`, `chore`)","type":"string"},"section":{"description":"Changelog section title","type":"string"},"hidden":{"description":"Skip displaying this type of commit. Defaults to `false`.","type":"boolean"}},"required":["type","section"]}},"release-as":{"description":"[DEPRECATED] Override the next version of this package. Consider using a `Release-As` commit instead.","type":"string"},"skip-github-release":{"description":"Skip tagging GitHub releases for this package. Release-Please still requires releases to be tagged, so this option should only be used if you have existing infrastructure to tag these releases.Defaults to `false`.","type":"boolean"},"skip-changelog":{"description":"Skip generating a changelog for this package. Defaults to `false`.","type":"boolean"},"draft":{"description":"Create the GitHub release in draft mode. Defaults to `false`.","type":"boolean"},"prerelease":{"description":"Create the GitHub release as prerelease. Defaults to `false`.","type":"boolean"},"draft-pull-request":{"description":"Open the release pull request in draft mode. Defaults to `false`.","type":"boolean"},"extra-label":{"description":"Comma-separated list of labels to add to a newly opened pull request","type":"string"},"include-component-in-tag":{"description":"When tagging a release, include the component name as part of the tag. Defaults to `true`.","type":"boolean"},"include-v-in-tag":{"description":"When tagging a release, include `v` in the tag. Defaults to `false`.","type":"boolean"},"changelog-type":{"description":"The type of changelog to use. Defaults to `default`.","type":"string","enum":["default","github"]},"changelog-host":{"description":"Generate changelog links to this GitHub host. Useful for running against GitHub Enterprise.","type":"string"},"changelog-path":{"description":"Path to the file that tracks release note changes. Defaults to `CHANGELOG.md`.","type":"string"},"pull-request-title-pattern":{"description":"Customize the release pull request title.","type":"string"},"pull-request-header":{"description":"Customize the release pull request header.","type":"string"},"pull-request-footer":{"description":"Customize the release pull request footer.","type":"string"},"separate-pull-requests":{"description":"Open a separate release pull request for each component. Defaults to `false`.","type":"boolean"},"always-update":{"description":"Always update the pull request with the latest changes. Defaults to `false`.","type":"boolean"},"tag-separator":{"description":"Customize the separator between the component and version in the GitHub tag.","type":"string"},"date-format":{"description":"Date format given as a strftime expression for the generic strategy.","type":"string"},"extra-files":{"description":"Specify extra generic files to replace versions.","type":"array","items":{"anyOf":[{"description":"The path to the file. The `Generic` updater uses annotations to replace versions.","type":"string"},{"description":"An extra JSON, YAML, or TOML file with a targeted update via jsonpath.","type":"object","properties":{"type":{"description":"The file format type.","enum":["json","toml","yaml"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"},"jsonpath":{"description":"The jsonpath to the version entry in the file.","type":"string"}},"required":["type","path","jsonpath"]},{"description":"An extra XML file with a targeted update via xpath.","type":"object","properties":{"type":{"description":"The file format type.","enum":["xml"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"},"xpath":{"description":"The xpath to the version entry in the file.","type":"string"}},"required":["type","path","xpath"]},{"description":"An extra pom.xml file.","type":"object","properties":{"type":{"description":"The file format type.","enum":["pom"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"}},"required":["type","path"]},{"description":"An extra arbitrary file that includes release-please generic updater\'s annotation.","type":"object","properties":{"type":{"description":"The file format type.","enum":["generic"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"}},"required":["type","path"]}]}},"exclude-paths":{"description":"Path of commits to be excluded from parsing. If all files from commit belong to one of the paths it will be skipped","type":"array","items":{"type":"string"}},"additional-paths":{"description":"Path of commits, from outside the package, to be included in parsing.","type":"array","items":{"type":"string"}},"version-file":{"description":"Path to the specialize version file. Used by `ruby` and `simple` strategies.","type":"string"},"snapshot-label":{"description":"Label to add to snapshot pull request. Used by `java` strategies.","type":"string"},"skip-snapshot":{"description":"If set, do not propose snapshot pull requests. Used by `java` strategies.","type":"boolean"},"initial-version":{"description":"Releases the initial library with a specified version","type":"string"},"component-no-space":{"description":"release-please automatically adds ` ` (space) in front of parsed ${component}. This option indicates whether that behaviour should be disabled. Defaults to `false`","type":"boolean"}}}},"allOf":[{"$ref":"#/definitions/ReleaserConfigOptions"},{"properties":{"$schema":{"description":"Path to the release-please manifest config schema","type":"string","format":"uri-reference"},"packages":{"description":"Per-path component configuration.","type":"object","additionalProperties":{"$ref":"#/definitions/ReleaserConfigOptions"}},"bootstrap-sha":{"description":"For the initial release of a library, only consider as far back as this commit SHA. This is an uncommon use case and should generally be avoided.","type":"string"},"last-release-sha":{"description":"For any release, only consider as far back as this commit SHA. This is an uncommon use case and should generally be avoided.","type":"string"},"always-link-local":{"description":"When using the `node-workspace` plugin, force all local dependencies to be linked.","type":"boolean"},"plugins":{"description":"Plugins to apply to pull requests. Plugins can be added to perform extra release processing that cannot be achieved by an individual release strategy.","type":"array","items":{"anyOf":[{"description":"The plugin name for plugins that do not require other options.","type":"string"},{"description":"Configuration for the `linked-versions` plugin.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["linked-versions"]},"groupName":{"description":"The name of the group of components.","type":"string"},"components":{"description":"List of component names that are part of this group.","type":"array","items":{"type":"string"}},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"specialWords":{"description":"Words that sentence casing logic will not be applied to","type":"array","items":{"type":"string"}}},"required":["type","groupName","components"]},{"description":"Configuration for various `workspace` plugins.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["cargo-workspace","maven-workspace"]},"updateAllPackages":{"description":"Whether to force updating all packages regardless of the dependency tree. Defaults to `false`.","type":"boolean"},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"considerAllArtifacts":{"description":"Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.","type":"boolean"}}},{"description":"Configuration for various `workspace` plugins.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["node-workspace"]},"updateAllPackages":{"description":"Whether to force updating all packages regardless of the dependency tree. Defaults to `false`.","type":"boolean"},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"considerAllArtifacts":{"description":"Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.","type":"boolean"},"updatePeerDependencies":{"description":"Also bump peer dependency versions if they are modified. Defaults to `false`.","type":"boolean"}}},{"description":"Configuration for various `group-priority` plugin","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["group-priority"]},"groups":{"description":"Group names ordered with highest priority first.","type":"array","items":{"type":"string"}}}},{"description":"Other plugins","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string"}}}]}},"signoff":{"description":"Text to be used as Signed-off-by in the commit.","type":"string"},"group-pull-request-title-pattern":{"description":"When grouping multiple release pull requests use this pattern for the title.","type":"string"},"release-search-depth":{"description":"When considering previously releases, only look this deep.","type":"number"},"commit-search-depth":{"description":"When considering commit history, only look this many commits deep.","type":"number"},"sequential-calls":{"description":"Whether to open pull requests/releases sequentially rather than concurrently. If you have many components, you may want to set this to avoid secondary rate limits.","type":"boolean"},"label":{"description":"Comma-separated list of labels to add to newly opened pull request. These are used to identify release pull requests.","type":"string"},"release-label":{"description":"Comma-separated list of labels to add to a pull request that has been released/tagged","type":"string"},"component-no-space":{"description":"release-please automatically adds ` ` (space) in front of parsed ${component}. This option indicates whether that behaviour should be disabled. Defaults to `false`","type":"boolean"}},"required":["packages"]}],"properties":{"$schema":true,"packages":true,"bootstrap-sha":true,"last-release-sha":true,"always-link-local":true,"plugins":true,"signoff":true,"group-pull-request-title-pattern":true,"release-search-depth":true,"commit-search-depth":true,"sequential-calls":true,"release-type":true,"bump-minor-pre-major":true,"bump-patch-for-minor-pre-major":true,"versioning":true,"changelog-sections":true,"release-as":true,"skip-github-release":true,"skip-changelog":true,"draft":true,"prerelease":true,"draft-pull-request":true,"label":true,"release-label":true,"extra-label":true,"include-component-in-tag":true,"include-v-in-tag":true,"changelog-type":true,"changelog-host":true,"changelog-path":true,"pull-request-title-pattern":true,"pull-request-header":true,"pull-request-footer":true,"separate-pull-requests":true,"always-update":true,"tag-separator":true,"date-format":true,"extra-files":true,"version-file":true,"snapshot-label":true,"initial-version":true,"exclude-paths":true,"component-no-space":false,"additional-paths":true}}');
 
 /***/ }),
 
