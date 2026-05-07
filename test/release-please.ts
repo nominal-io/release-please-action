@@ -93,6 +93,17 @@ describe("release-please-action", () => {
   });
   describe("configuration", () => {
     let fakeManifest: sinon.SinonStubbedInstance<Manifest>;
+    it("rejects invalid source pull request numbers", async () => {
+      restoreEnv = mockInputs({
+        "source-pull-request-number": "abc",
+      });
+
+      await assert.rejects(
+        action.main(fetch),
+        /source-pull-request-number must be a positive integer/
+      );
+    });
+
     describe("with release-type", () => {
       let fromConfigStub: sinon.SinonStub;
       beforeEach(() => {
@@ -235,6 +246,18 @@ describe("release-please-action", () => {
         await action.main(fetch);
         sinon.assert.calledOnce(fakeManifest.createReleases);
         sinon.assert.calledOnce(fakeManifest.createPullRequests);
+      });
+      it("passes source pull request number to manifest", async () => {
+        restoreEnv = mockInputs({
+          "source-pull-request-number": "123",
+        });
+        fakeManifest.createReleases.resolves([]);
+        fakeManifest.createPullRequests.resolves([]);
+        await action.main(fetch);
+        sinon.assert.calledOnce(fakeManifest.createReleases);
+        sinon.assert.calledOnceWithExactly(fakeManifest.createPullRequests, {
+          sourcePullRequestNumber: 123,
+        });
       });
       it("skips creating releases if skip-github-release specified", async () => {
         restoreEnv = mockInputs({

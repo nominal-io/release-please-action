@@ -10111,7 +10111,7 @@ Object.defineProperty(exports, "GitHub", ({ enumerable: true, get: function () {
 exports.configSchema = __nccwpck_require__(26060);
 exports.manifestSchema = __nccwpck_require__(8695);
 // x-release-please-start-version
-exports.VERSION = '18.2.0';
+exports.VERSION = '18.2.1';
 // x-release-please-end
 //# sourceMappingURL=index.js.map
 
@@ -10500,7 +10500,7 @@ class Manifest {
                 newReleasePullRequests.push({
                     path,
                     config,
-                    pullRequest: releasePullRequest,
+                    pullRequest: withSourcePullRequestNumbers(releasePullRequest, sourcePullRequestNumbers(commitsPerPath[path])),
                 });
             }
         }
@@ -10590,8 +10590,14 @@ class Manifest {
      *
      * @returns {PullRequest[]} Pull request numbers of release pull requests
      */
-    async createPullRequests() {
-        const candidatePullRequests = await this.buildPullRequests();
+    async createPullRequests(options = {}) {
+        let candidatePullRequests = await this.buildPullRequests();
+        if (options.sourcePullRequestNumber) {
+            const sourcePullRequestNumber = options.sourcePullRequestNumber;
+            const unfilteredCount = candidatePullRequests.length;
+            candidatePullRequests = candidatePullRequests.filter(pullRequest => { var _a; return (_a = pullRequest.sourcePullRequestNumbers) === null || _a === void 0 ? void 0 : _a.includes(sourcePullRequestNumber); });
+            this.logger.info(`Filtered release pull requests by source PR #${sourcePullRequestNumber}: ${candidatePullRequests.length}/${unfilteredCount} matched.`);
+        }
         if (candidatePullRequests.length === 0) {
             return [];
         }
@@ -10665,19 +10671,26 @@ class Manifest {
         return snoozedPullRequests;
     }
     async createOrUpdatePullRequest(pullRequest, openPullRequests, snoozedPullRequests) {
+        var _a, _b, _c;
         // look for existing, open pull request
         const existing = openPullRequests.find(openPullRequest => openPullRequest.headBranchName === pullRequest.headRefName);
         if (existing) {
-            return this.alwaysUpdate
+            const updatedPullRequest = this.alwaysUpdate
                 ? await this.updateExistingPullRequest(existing, pullRequest)
                 : await this.maybeUpdateExistingPullRequest(existing, pullRequest);
+            return updatedPullRequest
+                ? withSourcePullRequestNumbers(updatedPullRequest, (_a = pullRequest.sourcePullRequestNumbers) !== null && _a !== void 0 ? _a : [])
+                : undefined;
         }
         // look for closed, snoozed pull request
         const snoozed = snoozedPullRequests.find(openPullRequest => openPullRequest.headBranchName === pullRequest.headRefName);
         if (snoozed) {
-            return this.alwaysUpdate
+            const updatedPullRequest = this.alwaysUpdate
                 ? await this.updateExistingPullRequest(snoozed, pullRequest)
                 : await this.maybeUpdateSnoozedPullRequest(snoozed, pullRequest);
+            return updatedPullRequest
+                ? withSourcePullRequestNumbers(updatedPullRequest, (_b = pullRequest.sourcePullRequestNumbers) !== null && _b !== void 0 ? _b : [])
+                : undefined;
         }
         const body = await this.pullRequestOverflowHandler.handleOverflow(pullRequest);
         const message = this.signoffUser
@@ -10695,7 +10708,7 @@ class Manifest {
             fork: this.fork,
             draft: pullRequest.draft,
         });
-        return newPullRequest;
+        return withSourcePullRequestNumbers(newPullRequest, (_c = pullRequest.sourcePullRequestNumbers) !== null && _c !== void 0 ? _c : []);
     }
     /// only update an existing pull request if it has release note changes
     async maybeUpdateExistingPullRequest(existing, pullRequest) {
@@ -11241,6 +11254,26 @@ function commitsAfterSha(commits, lastReleaseSha) {
         return commits;
     }
     return commits.slice(0, index);
+}
+function sourcePullRequestNumbers(commits) {
+    const numbers = new Set();
+    for (const commit of commits) {
+        if (commit.pullRequest) {
+            numbers.add(commit.pullRequest.number);
+        }
+    }
+    return Array.from(numbers);
+}
+function withSourcePullRequestNumbers(pullRequest, numbers) {
+    var _a;
+    const sourcePullRequestNumbers = Array.from(new Set([...((_a = pullRequest.sourcePullRequestNumbers) !== null && _a !== void 0 ? _a : []), ...numbers]));
+    if (sourcePullRequestNumbers.length === 0) {
+        return pullRequest;
+    }
+    return {
+        ...pullRequest,
+        sourcePullRequestNumbers,
+    };
 }
 /**
  * Returns true if the release tag matches the configured component. Returns
@@ -12381,7 +12414,7 @@ class Merge extends plugin_1.ManifestPlugin {
         this.forceMerge = (_b = options.forceMerge) !== null && _b !== void 0 ? _b : false;
     }
     async run(candidates) {
-        var _a, _b;
+        var _a, _b, _c;
         if (candidates.length < 1) {
             return candidates;
         }
@@ -12397,6 +12430,7 @@ class Merge extends plugin_1.ManifestPlugin {
         }, [[], []]);
         const releaseData = [];
         const labels = new Set();
+        const sourcePullRequestNumbers = new Set();
         let rawUpdates = [];
         let rootRelease = null;
         for (const candidate of inScopeCandidates) {
@@ -12406,6 +12440,9 @@ class Merge extends plugin_1.ManifestPlugin {
                 labels.add(label);
             }
             releaseData.push(...pullRequest.body.releaseData);
+            for (const number of (_a = pullRequest.sourcePullRequestNumbers) !== null && _a !== void 0 ? _a : []) {
+                sourcePullRequestNumbers.add(number);
+            }
             if (candidate.path === '.') {
                 rootRelease = candidate;
             }
@@ -12415,7 +12452,7 @@ class Merge extends plugin_1.ManifestPlugin {
         // only if there's no rootRelease AND all candidates have the same version (linked-versions case)
         let version = rootRelease === null || rootRelease === void 0 ? void 0 : rootRelease.pullRequest.title.version;
         if (!version && inScopeCandidates.length > 0) {
-            const firstVersion = (_a = inScopeCandidates[0]) === null || _a === void 0 ? void 0 : _a.pullRequest.version;
+            const firstVersion = (_b = inScopeCandidates[0]) === null || _b === void 0 ? void 0 : _b.pullRequest.version;
             const allSameVersion = inScopeCandidates.every(candidate => { var _a; return ((_a = candidate.pullRequest.version) === null || _a === void 0 ? void 0 : _a.toString()) === (firstVersion === null || firstVersion === void 0 ? void 0 : firstVersion.toString()); });
             if (allSameVersion) {
                 version = firstVersion;
@@ -12430,8 +12467,11 @@ class Merge extends plugin_1.ManifestPlugin {
             }),
             updates,
             labels: Array.from(labels),
-            headRefName: (_b = this.headBranchName) !== null && _b !== void 0 ? _b : branch_name_1.BranchName.ofTargetBranch(this.targetBranch).toString(),
+            headRefName: (_c = this.headBranchName) !== null && _c !== void 0 ? _c : branch_name_1.BranchName.ofTargetBranch(this.targetBranch).toString(),
             draft: !candidates.some(candidate => !candidate.pullRequest.draft),
+            ...(sourcePullRequestNumbers.size
+                ? { sourcePullRequestNumbers: Array.from(sourcePullRequestNumbers) }
+                : {}),
         };
         const releaseTypes = new Set(candidates.map(candidate => candidate.config.releaseType));
         const releaseType = releaseTypes.size === 1 ? releaseTypes.values().next().value : 'simple';
@@ -107402,7 +107442,7 @@ exports.JSONPath = JSONPath;
 /***/ ((module) => {
 
 "use strict";
-module.exports = {"i8":"18.2.0"};
+module.exports = {"i8":"18.2.1"};
 
 /***/ }),
 
@@ -107521,6 +107561,7 @@ function parseInputs() {
         changelogHost: core.getInput("changelog-host") || DEFAULT_GITHUB_SERVER_URL,
         versioningStrategy: getOptionalInput("versioning-strategy"),
         releaseAs: getOptionalInput("release-as"),
+        sourcePullRequestNumber: getOptionalNumberInput("source-pull-request-number"),
     };
     return inputs;
 }
@@ -107533,6 +107574,17 @@ function getOptionalBooleanInput(name) {
         return undefined;
     }
     return core.getBooleanInput(name);
+}
+function getOptionalNumberInput(name) {
+    const val = core.getInput(name);
+    if (val === "" || val === undefined) {
+        return undefined;
+    }
+    const parsed = Number(val);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+        throw new Error(`${name} must be a positive integer`);
+    }
+    return parsed;
 }
 function loadOrBuildManifest(github, inputs) {
     if (inputs.releaseType) {
@@ -107579,7 +107631,12 @@ async function main(fetchOverride) {
     if (!inputs.skipGitHubPullRequest) {
         const manifest = await loadOrBuildManifest(github, inputs);
         core.debug("Creating pull requests");
-        outputPRs(await manifest.createPullRequests());
+        const pullRequests = inputs.sourcePullRequestNumber
+            ? await manifest.createPullRequests({
+                sourcePullRequestNumber: inputs.sourcePullRequestNumber,
+            })
+            : await manifest.createPullRequests();
+        outputPRs(pullRequests);
     }
 }
 exports.main = main;
