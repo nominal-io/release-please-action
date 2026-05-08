@@ -74,6 +74,10 @@ inputs:
     description: 'The version to release as.'
     required: false
     default: ''
+  source-pull-request-number:
+    description: 'Only create or update release PRs affected by this merged source PR number.'
+    required: false
+    default: ''
 runs:
   using: 'node20'
   main: 'dist/index.js'

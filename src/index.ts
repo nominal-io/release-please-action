@@ -51,6 +51,7 @@ interface ActionInputs {
   changelogHost: string;
   versioningStrategy?: string;
   releaseAs?: string;
+  sourcePullRequestNumber?: number;
 }
 
 function parseInputs(): ActionInputs {
@@ -75,6 +76,9 @@ function parseInputs(): ActionInputs {
     changelogHost: core.getInput("changelog-host") || DEFAULT_GITHUB_SERVER_URL,
     versioningStrategy: getOptionalInput("versioning-strategy"),
     releaseAs: getOptionalInput("release-as"),
+    sourcePullRequestNumber: getOptionalNumberInput(
+      "source-pull-request-number"
+    ),
   };
   return inputs;
 }
@@ -89,6 +93,18 @@ function getOptionalBooleanInput(name: string): boolean | undefined {
     return undefined;
   }
   return core.getBooleanInput(name);
+}
+
+function getOptionalNumberInput(name: string): number | undefined {
+  const val = core.getInput(name);
+  if (val === "" || val === undefined) {
+    return undefined;
+  }
+  const parsed = Number(val);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function loadOrBuildManifest(
@@ -157,7 +173,12 @@ export async function main(fetchOverride?: any) {
   if (!inputs.skipGitHubPullRequest) {
     const manifest = await loadOrBuildManifest(github, inputs);
     core.debug("Creating pull requests");
-    outputPRs(await manifest.createPullRequests());
+    const pullRequests = inputs.sourcePullRequestNumber
+      ? await manifest.createPullRequests({
+          sourcePullRequestNumber: inputs.sourcePullRequestNumber,
+        })
+      : await manifest.createPullRequests();
+    outputPRs(pullRequests);
   }
 }
 
