@@ -75,9 +75,13 @@ inputs:
     required: false
     default: ''
   source-pull-request-number:
-    description: 'Only create or update release PRs affected by this merged source PR number.'
+    description: 'Merged source PR number to report to downstream automation. Can also filter release PRs when filter-by-source-pull-request is true.'
     required: false
     default: ''
+  filter-by-source-pull-request:
+    description: 'Only create or update release PRs affected by source-pull-request-number.'
+    required: false
+    default: false
 runs:
   using: 'node20'
   main: 'dist/index.js'

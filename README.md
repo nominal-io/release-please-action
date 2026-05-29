@@ -84,7 +84,9 @@ steps:
 | `proxy-server`             | Configure a proxy server in the form of `<host>:<port>` e.g. `proxy-host.com:8080`                                                    |
 | `skip-github-release`      | If `true`, do not attempt to create releases. This is useful if splitting release tagging from PR creation.                            |
 | `skip-github-pull-request` | If `true`, do not attempt to create release pull requests. This is useful if splitting release tagging from PR creation.               |
-| `skip-labeling`            | If `true`, do not attempt to label the PR.                                                                                          |
+| `skip-labeling`            | If `true`, do not attempt to label the PR.                                                                                            |
+| `source-pull-request-number` | Merged source PR number. Can filter release PRs when `filter-by-source-pull-request` is true.                                         |
+| `filter-by-source-pull-request` | If `true`, only create or update release PRs affected by `source-pull-request-number`.                                            |
 
 ## GitHub Credentials
 

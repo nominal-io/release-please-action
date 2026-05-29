@@ -52,6 +52,7 @@ interface ActionInputs {
   versioningStrategy?: string;
   releaseAs?: string;
   sourcePullRequestNumber?: number;
+  filterBySourcePullRequest: boolean;
 }
 
 function parseInputs(): ActionInputs {
@@ -78,6 +79,9 @@ function parseInputs(): ActionInputs {
     releaseAs: getOptionalInput("release-as"),
     sourcePullRequestNumber: getOptionalNumberInput(
       "source-pull-request-number"
+    ),
+    filterBySourcePullRequest: core.getBooleanInput(
+      "filter-by-source-pull-request"
     ),
   };
   return inputs;
@@ -173,7 +177,7 @@ export async function main(fetchOverride?: any) {
   if (!inputs.skipGitHubPullRequest) {
     const manifest = await loadOrBuildManifest(github, inputs);
     core.debug("Creating pull requests");
-    const pullRequests = inputs.sourcePullRequestNumber
+    const pullRequests = inputs.sourcePullRequestNumber && inputs.filterBySourcePullRequest
       ? await manifest.createPullRequests({
           sourcePullRequestNumber: inputs.sourcePullRequestNumber,
         })

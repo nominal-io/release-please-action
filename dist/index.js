@@ -107562,6 +107562,7 @@ function parseInputs() {
         versioningStrategy: getOptionalInput("versioning-strategy"),
         releaseAs: getOptionalInput("release-as"),
         sourcePullRequestNumber: getOptionalNumberInput("source-pull-request-number"),
+        filterBySourcePullRequest: core.getBooleanInput("filter-by-source-pull-request"),
     };
     return inputs;
 }
@@ -107631,7 +107632,7 @@ async function main(fetchOverride) {
     if (!inputs.skipGitHubPullRequest) {
         const manifest = await loadOrBuildManifest(github, inputs);
         core.debug("Creating pull requests");
-        const pullRequests = inputs.sourcePullRequestNumber
+        const pullRequests = inputs.sourcePullRequestNumber && inputs.filterBySourcePullRequest
             ? await manifest.createPullRequests({
                 sourcePullRequestNumber: inputs.sourcePullRequestNumber,
             })

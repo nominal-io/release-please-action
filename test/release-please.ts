@@ -27,6 +27,7 @@ import { Manifest, GitHub } from "@nominal-io/release-please";
 
 const DEFAULT_INPUTS: Record<string, string> = {
   token: "fake-token",
+  "filter-by-source-pull-request": "false",
 };
 
 const fixturePrs = [
@@ -247,9 +248,20 @@ describe("release-please-action", () => {
         sinon.assert.calledOnce(fakeManifest.createReleases);
         sinon.assert.calledOnce(fakeManifest.createPullRequests);
       });
-      it("passes source pull request number to manifest", async () => {
+      it("does not filter by source pull request number by default", async () => {
         restoreEnv = mockInputs({
           "source-pull-request-number": "123",
+        });
+        fakeManifest.createReleases.resolves([]);
+        fakeManifest.createPullRequests.resolves([]);
+        await action.main(fetch);
+        sinon.assert.calledOnce(fakeManifest.createReleases);
+        sinon.assert.calledOnceWithExactly(fakeManifest.createPullRequests);
+      });
+      it("passes source pull request number to manifest when filtering is enabled", async () => {
+        restoreEnv = mockInputs({
+          "source-pull-request-number": "123",
+          "filter-by-source-pull-request": "true",
         });
         fakeManifest.createReleases.resolves([]);
         fakeManifest.createPullRequests.resolves([]);
