@@ -9592,6 +9592,43 @@ class GitHub {
             return undefined;
         });
         /**
+         * Look up a single tag by exact name.
+         *
+         * @param {string} name The tag name, without the `refs/tags/` prefix
+         * @returns {ScmTag | undefined} The tag and the commit SHA it points at,
+         *   or undefined if there is no such tag
+         * @throws {GitHubAPIError} on an API error
+         */
+        this.getTag = wrapAsync(async (name) => {
+            let sha;
+            let type;
+            try {
+                const { data } = await this.octokit.git.getRef({
+                    owner: this.repository.owner,
+                    repo: this.repository.repo,
+                    ref: `tags/${name}`,
+                });
+                ({ sha, type } = data.object);
+            }
+            catch (e) {
+                if (e instanceof request_error_1.RequestError && e.status === 404) {
+                    return undefined;
+                }
+                throw e;
+            }
+            // An annotated tag points at a tag object; peel it to the commit, which is
+            // what the list-tags API reports.
+            while (type === 'tag') {
+                const { data } = await this.octokit.git.getTag({
+                    owner: this.repository.owner,
+                    repo: this.repository.repo,
+                    tag_sha: sha,
+                });
+                ({ sha, type } = data.object);
+            }
+            return { name, sha };
+        });
+        /**
          * Returns a list of paths to all files with a given name.
          *
          * If a prefix is specified, only return paths that match
@@ -10299,7 +10336,7 @@ Object.defineProperty(exports, "GitHub", ({ enumerable: true, get: function () {
 exports.configSchema = __nccwpck_require__(26060);
 exports.manifestSchema = __nccwpck_require__(8695);
 // x-release-please-start-version
-exports.VERSION = '18.3.0';
+exports.VERSION = '18.3.1';
 // x-release-please-end
 //# sourceMappingURL=index.js.map
 
@@ -10502,6 +10539,22 @@ class Manifest {
      * @returns {ReleasePullRequest[]} The candidate pull requests to open or update.
      */
     async buildPullRequests() {
+        // Bazel dependency queries only read the local checkout, so run them while
+        // the GitHub API calls are in flight. A rejection surfaces where the paths
+        // are awaited; the no-op catch only stops Node reporting it as unhandled
+        // when an earlier step throws first.
+        const abort = new AbortController();
+        const additionalPaths = this.resolveAdditionalPaths(abort.signal);
+        additionalPaths.catch(() => { });
+        try {
+            return await this.buildCandidatePullRequests(additionalPaths);
+        }
+        finally {
+            // Stop queries still running when building fails before it needs them.
+            abort.abort();
+        }
+    }
+    async buildCandidatePullRequests(additionalPathsPromise) {
         var _a;
         this.logger.info('Building pull requests');
         const pathsByComponent = await this.getPathsByComponent();
@@ -10617,21 +10670,7 @@ class Manifest {
         if (releaseCommitsFound < expectedShas) {
             this.logger.warn(`Expected ${expectedShas} commits, only found ${releaseCommitsFound}`);
         }
-        // resolve bazel-deps-query for each package and merge with additionalPaths
-        const resolvedAdditionalPaths = {};
-        for (const [path, config] of Object.entries(this.repositoryConfig)) {
-            const staticPaths = config.additionalPaths || [];
-            let bazelPaths = [];
-            // Root packages already receive all commits and need no dependency query.
-            if (config.bazelDepsQuery && path !== exports.ROOT_PROJECT_PATH) {
-                const queryExpression = (0, bazel_query_1.resolveBazelQuery)(config.bazelDepsQuery, path);
-                bazelPaths = (0, bazel_query_1.runBazelQuery)(queryExpression, path, this.logger);
-                this.logger.info(`bazel-deps-query resolved paths for ${path}: ${JSON.stringify(bazelPaths)}`);
-            }
-            // merge and deduplicate
-            const allPaths = [...new Set([...staticPaths, ...bazelPaths])];
-            resolvedAdditionalPaths[path] = allPaths;
-        }
+        const resolvedAdditionalPaths = await additionalPathsPromise;
         // split commits by path
         this.logger.info(`Splitting ${commits.length} commits by path`);
         const cs = new commit_split_1.CommitSplit({
@@ -10744,9 +10783,32 @@ class Manifest {
         }
         return newReleasePullRequests.map(pullRequestWithConfig => pullRequestWithConfig.pullRequest);
     }
+    /**
+     * Resolve each package's additional paths: its static `additionalPaths`
+     * merged with the result of its `bazel-deps-query`, if any.
+     */
+    async resolveAdditionalPaths(signal) {
+        const resolvedAdditionalPaths = {};
+        for (const [path, config] of Object.entries(this.repositoryConfig)) {
+            signal === null || signal === void 0 ? void 0 : signal.throwIfAborted();
+            const staticPaths = config.additionalPaths || [];
+            let bazelPaths = [];
+            // Root packages already receive all commits and need no dependency query.
+            if (config.bazelDepsQuery && path !== exports.ROOT_PROJECT_PATH) {
+                const queryExpression = (0, bazel_query_1.resolveBazelQuery)(config.bazelDepsQuery, path);
+                bazelPaths = await (0, bazel_query_1.runBazelQuery)(queryExpression, path, this.logger, {
+                    signal,
+                });
+                this.logger.info(`bazel-deps-query resolved paths for ${path}: ${JSON.stringify(bazelPaths)}`);
+            }
+            // merge and deduplicate
+            const allPaths = [...new Set([...staticPaths, ...bazelPaths])];
+            resolvedAdditionalPaths[path] = allPaths;
+        }
+        return resolvedAdditionalPaths;
+    }
     async backfillReleasesFromTags(missingPaths, strategiesByPath) {
         const releasesByPath = {};
-        const allTags = await this.getAllTags();
         for (const path of missingPaths) {
             const expectedVersion = this.releasedVersions[path];
             if (!expectedVersion) {
@@ -10756,7 +10818,7 @@ class Manifest {
             const component = await strategiesByPath[path].getComponent();
             const expectedTag = new tag_name_1.TagName(expectedVersion, component, this.repositoryConfig[path].tagSeparator, this.repositoryConfig[path].includeVInTag);
             this.logger.debug(`looking for tagName: ${expectedTag.toString()}`);
-            const foundTag = allTags[expectedTag.toString()];
+            const foundTag = await this.github.getTag(expectedTag.toString());
             if (foundTag) {
                 this.logger.debug(`found: ${foundTag.name} ${foundTag.sha}`);
                 releasesByPath[path] = {
@@ -10772,7 +10834,7 @@ class Manifest {
                     this.logger.debug('could not find release, checking root package');
                     const rootComponent = await strategiesByPath[exports.ROOT_PROJECT_PATH].getComponent();
                     const rootTag = new tag_name_1.TagName(expectedVersion, rootComponent, this.repositoryConfig[exports.ROOT_PROJECT_PATH].tagSeparator, this.repositoryConfig[exports.ROOT_PROJECT_PATH].includeVInTag);
-                    const foundTag = allTags[rootTag.toString()];
+                    const foundTag = await this.github.getTag(rootTag.toString());
                     if (foundTag) {
                         this.logger.debug(`found rootTag: ${foundTag.name} ${foundTag.sha}`);
                         releasesByPath[path] = {
@@ -10786,13 +10848,6 @@ class Manifest {
             }
         }
         return releasesByPath;
-    }
-    async getAllTags() {
-        const allTags = {};
-        for await (const tag of this.github.tagIterator()) {
-            allTags[tag.name] = tag;
-        }
-        return allTags;
     }
     /**
      * Opens/updates all candidate release pull requests for this repository.
@@ -20163,37 +20218,70 @@ function resolveBazelQuery(configValue, packagePath) {
     return trimmed;
 }
 exports.resolveBazelQuery = resolveBazelQuery;
+// Matches stderr from a failed external repository download, such as a 5xx
+// from GitHub release assets. These are transient, and a retry on the same
+// Bazel server only re-fetches the repositories that failed.
+const REPOSITORY_FETCH_FAILURE = /Error downloading|error occurred during the fetch of repository/;
+function execBazelQuery(expression, signal) {
+    return new Promise((resolve, reject) => {
+        (0, child_process_1.execFile)('bazel', ['query', expression], {
+            encoding: 'utf-8',
+            timeout: 120000,
+            maxBuffer: 64 * 1024 * 1024,
+            signal,
+        }, (error, stdout, stderr) => {
+            if (error) {
+                reject(Object.assign(error, { stderr }));
+            }
+            else {
+                resolve(stdout);
+            }
+        });
+    });
+}
 /**
  * Execute a bazel query expression and return the parsed local package paths.
  *
- * This uses `execFileSync` (no shell) to reduce the risk of command injection.
+ * This uses `execFile` (no shell) to reduce the risk of command injection. It
+ * runs asynchronously so callers can overlap it with GitHub API calls.
+ * A query that fails while fetching an external repository is retried; any
+ * other failure is thrown immediately.
  *
  * @param queryExpression The query expression to execute (e.g., "deps(//combined-service)")
  * @param excludePath Optional path to exclude from results
  * @param logger Optional logger instance
+ * @param options Optional retry and cancellation settings
  * @returns Array of unique local package paths
  */
-function runBazelQuery(queryExpression, excludePath, logger) {
+async function runBazelQuery(queryExpression, excludePath, logger, { attempts = 3, retryDelayMs = 15000, signal } = {}) {
+    var _a;
     const localQueryExpression = `filter('^//', ${queryExpression})`;
     logger === null || logger === void 0 ? void 0 : logger.info(`Running bazel deps query: bazel query '${localQueryExpression}'`);
-    try {
-        const output = (0, child_process_1.execFileSync)('bazel', ['query', localQueryExpression], {
-            encoding: 'utf-8',
-            timeout: 120000,
-            maxBuffer: 64 * 1024 * 1024,
-            stdio: ['pipe', 'pipe', 'pipe'],
-        });
+    for (let attempt = 1;; attempt++) {
+        let output;
+        try {
+            output = await execBazelQuery(localQueryExpression, signal);
+        }
+        catch (err) {
+            if (signal === null || signal === void 0 ? void 0 : signal.aborted) {
+                throw err;
+            }
+            const error = err;
+            logger === null || logger === void 0 ? void 0 : logger.error(`Failed to run bazel deps query "${queryExpression}": ${error.message}`);
+            if (error.stderr) {
+                logger === null || logger === void 0 ? void 0 : logger.error(`stderr: ${error.stderr}`);
+            }
+            if (attempt < attempts &&
+                REPOSITORY_FETCH_FAILURE.test((_a = error.stderr) !== null && _a !== void 0 ? _a : '')) {
+                logger === null || logger === void 0 ? void 0 : logger.warn(`Repository fetch failed; retrying bazel deps query (attempt ${attempt + 1} of ${attempts}) in ${retryDelayMs}ms`);
+                await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+                continue;
+            }
+            throw new Error(`Failed to execute bazel-deps-query "${queryExpression}": ${error.message}`);
+        }
         const paths = parseBazelQueryOutput(output, excludePath);
         logger === null || logger === void 0 ? void 0 : logger.info(`Bazel deps query resolved ${paths.length} additional paths: ${JSON.stringify(paths)}`);
         return paths;
-    }
-    catch (err) {
-        const error = err;
-        logger === null || logger === void 0 ? void 0 : logger.error(`Failed to run bazel deps query "${queryExpression}": ${error.message}`);
-        if (error.stderr) {
-            logger === null || logger === void 0 ? void 0 : logger.error(`stderr: ${error.stderr}`);
-        }
-        throw new Error(`Failed to execute bazel-deps-query "${queryExpression}": ${error.message}`);
     }
 }
 exports.runBazelQuery = runBazelQuery;
@@ -108059,7 +108147,7 @@ exports.JSONPath = JSONPath;
 /***/ ((module) => {
 
 "use strict";
-module.exports = {"i8":"18.3.0"};
+module.exports = {"i8":"18.3.1"};
 
 /***/ }),
 
